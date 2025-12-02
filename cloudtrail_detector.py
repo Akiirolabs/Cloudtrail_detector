@@ -8,12 +8,14 @@ Usage:
     python cloudtrail_detector.py /path/to/cloudtrail/logs > alerts.json
 """
 
+import argparse
 import json
+import logging
 import os
 import sys
 import glob
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from datetime import datetime, timedelta
 
 
@@ -318,31 +320,105 @@ def run_detection(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ------------- Main entrypoint -------------
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(
-            "Usage: python cloudtrail_detector.py /path/to/cloudtrail/logs_or_file.json",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _parse_since_arg(s: Optional[str]) -> Optional[datetime]:
+    """Parse --since argument. Accepts ISO UTC timestamp like 2025-11-30T15:04:05Z
+    or relative values like 30m, 2h, 1d (minutes/hours/days).
+    Returns a naive UTC datetime or None.
+    """
+    if not s:
+        return None
 
-    path = sys.argv[1]
-    events = load_cloudtrail_events(path)
+    # try ISO format first
+    try:
+        return parse_event_time(s)
+    except Exception:
+        pass
+
+    try:
+        num = int(s[:-1])
+        unit = s[-1]
+    except Exception:
+        raise ValueError("Invalid --since value; use ISO or relative like 30m,2h,1d")
+
+    now = datetime.utcnow()
+    if unit == "m":
+        return now - timedelta(minutes=num)
+    if unit == "h":
+        return now - timedelta(hours=num)
+    if unit == "d":
+        return now - timedelta(days=num)
+
+    raise ValueError("Invalid --since unit; use m/h/d")
+
+
+SEVERITY_RANK = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CloudTrail detection and alerting")
+    parser.add_argument("path", help="Path to CloudTrail JSON file or directory")
+    parser.add_argument(
+        "--since",
+        "-s",
+        help="Only process events since this time. ISO UTC or relative (e.g. 30m, 2h, 1d)",
+    )
+    parser.add_argument(
+        "--min-severity",
+        "-m",
+        choices=["critical", "high", "medium", "low"],
+        help="Only emit alerts at this severity or higher",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        choices=["json", "jsonl"],
+        default="json",
+        help="Output format: json (array) or jsonl (one JSON alert per line)",
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging to stderr")
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    try:
+        since_dt = _parse_since_arg(args.since) if args.since else None
+    except Exception as e:
+        print(f"Invalid --since value: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    events = load_cloudtrail_events(args.path)
+
+    if since_dt is not None:
+        filtered = []
+        for e in events:
+            try:
+                if parse_event_time(e["eventTime"]) >= since_dt:
+                    filtered.append(e)
+            except Exception:
+                # keep the event if we can't parse time (conservative)
+                filtered.append(e)
+        events = filtered
+
     alerts = run_detection(events)
-    json.dump(alerts, sys.stdout, indent=2)
+
+    if args.min_severity:
+        min_rank = SEVERITY_RANK[args.min_severity]
+        alerts = [a for a in alerts if SEVERITY_RANK.get(a.get("severity", "").lower(), 0) >= min_rank]
+
+    # Output
+    if args.output == "json":
+        json.dump(alerts, sys.stdout, indent=2)
+    else:
+        for a in alerts:
+            print(json.dumps(a))
 
 
 if __name__ == "__main__":
     main()
-def main():
-    if len(sys.argv) != 2:
-        print(
-            "Usage: python cloudtrail_detector.py /path/to/cloudtrail/logs_or_file.json",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    path = sys.argv[1]
-    events = load_cloudtrail_events(path)
-    alerts = run_detection(events)
-    json.dump(alerts, sys.stdout, indent=2)
